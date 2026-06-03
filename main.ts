@@ -1,6 +1,26 @@
 const BYPASS_SECRET = Deno.env.get("BYPASS_SECRET");
 const TARGET_HOST = "be.komikcast.cc";
-const CACHE_TTL = 5 * 60 * 1000; // 5 menit
+const CACHE_TTL_MS = 5 * 60 * 1000; // 5 menit
+
+// ─── Deno KV Cache ────────────────────────────────────────────────────────────
+const kv = await Deno.openKv();
+
+async function getCachedKV(url: string) {
+  const res = await kv.get<{ body: number[]; contentType: string }>(["cache", url]);
+  if (!res.value) return null;
+  return {
+    body: new Uint8Array(res.value.body).buffer,
+    contentType: res.value.contentType,
+  };
+}
+
+async function setCacheKV(url: string, body: ArrayBuffer, contentType: string) {
+  await kv.set(
+    ["cache", url],
+    { body: [...new Uint8Array(body)], contentType },
+    { expireIn: CACHE_TTL_MS },
+  );
+}
 
 // ─── Rate Limiter ─────────────────────────────────────────────────────────────
 const rateLimitMap = new Map<string, { count: number; ts: number }>();
@@ -38,23 +58,6 @@ function isValidTargetUrl(raw: string): boolean {
   }
 }
 
-// ─── In-Memory Cache ──────────────────────────────────────────────────────────
-const cache = new Map<string, {
-  body: ArrayBuffer;
-  contentType: string;
-  ts: number;
-}>();
-
-function getCached(url: string) {
-  const entry = cache.get(url);
-  if (!entry) return null;
-  if (Date.now() - entry.ts > CACHE_TTL) {
-    cache.delete(url);
-    return null;
-  }
-  return entry;
-}
-
 // ─── User Agents ──────────────────────────────────────────────────────────────
 const USER_AGENTS = [
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36",
@@ -85,12 +88,12 @@ function buildHeaders(ua: string): Record<string, string> {
 }
 
 // ─── Server ───────────────────────────────────────────────────────────────────
-Deno.serve(async (req) => {
+Deno.serve(async (req, info) => {
   const url = new URL(req.url);
   const start = Date.now();
 
-  const ip =
-    req.headers.get("x-forwarded-for")?.split(",")[0].trim() ?? "unknown";
+  // IP dari remoteAddr (akurat di Deno Deploy)
+  const ip = info.remoteAddr.hostname ?? "unknown";
   const userAgentHeader = req.headers.get("user-agent") ?? "unknown";
 
   const log = (status: number, note = "") => {
@@ -116,7 +119,7 @@ Deno.serve(async (req) => {
 
   // ── Rate limit per IP ──
   if (isRateLimited(ip)) {
-    log(429, "rate-limited");
+    log(429, `rate-limited ip:${ip}`);
     return new Response("Too Many Requests", {
       status: 429,
       headers: { "Retry-After": "60" },
@@ -136,11 +139,11 @@ Deno.serve(async (req) => {
     return new Response("Forbidden host", { status: 403 });
   }
 
-  // ── Cache hit ──
-  const cached = getCached(targetUrl);
+  // ── KV Cache hit ──
+  const cached = await getCachedKV(targetUrl);
   if (cached) {
     log(200, "cache-hit");
-    return new Response(cached.body.slice(0), {
+    return new Response(cached.body, {
       status: 200,
       headers: {
         "Content-Type": cached.contentType,
@@ -160,9 +163,9 @@ Deno.serve(async (req) => {
     const body = await res.arrayBuffer();
     const contentType = res.headers.get("Content-Type") ?? "application/json";
 
-    // Simpan ke cache hanya kalau sukses
+    // Simpan ke KV cache hanya kalau sukses
     if (res.ok) {
-      cache.set(targetUrl, { body, contentType, ts: Date.now() });
+      await setCacheKV(targetUrl, body, contentType);
     }
 
     log(res.status, res.ok ? "cache-miss" : "upstream-error");
