@@ -96,11 +96,11 @@ Deno.serve(async (req, info) => {
   const ip = info.remoteAddr.hostname ?? "unknown";
   const userAgentHeader = req.headers.get("user-agent") ?? "unknown";
 
-  const log = (status: number, note = "") => {
-    console.log(
-      `[${new Date().toISOString()}] ${req.method} ${url.pathname} - ${status} - ${Date.now() - start}ms - ip:${ip} - ua:${userAgentHeader.slice(0, 60)} ${note}`,
-    );
-  };
+  const log = (status: number, note = "", target = "") => {
+  console.log(
+    `[${new Date().toISOString()}] ${req.method} ${target || url.pathname} - ${status} - ${Date.now() - start}ms - ip:${ip} ${note}`,
+  );
+};
 
   // ── Health check / IP test ──
   if (url.pathname === "/ip") {
@@ -142,7 +142,7 @@ Deno.serve(async (req, info) => {
   // ── KV Cache hit ──
   const cached = await getCachedKV(targetUrl);
   if (cached) {
-    log(200, "cache-hit");
+    log(200, "cache-hit", targetUrl);
     return new Response(cached.body, {
       status: 200,
       headers: {
@@ -168,7 +168,7 @@ Deno.serve(async (req, info) => {
       await setCacheKV(targetUrl, body, contentType);
     }
 
-    log(res.status, res.ok ? "cache-miss" : "upstream-error");
+    log(res.status, res.ok ? "cache-miss" : "upstream-error", targetUrl);
     return new Response(body, {
       status: res.status,
       headers: {
@@ -178,7 +178,7 @@ Deno.serve(async (req, info) => {
       },
     });
   } catch (err) {
-    log(500, `error: ${err}`);
+    log(500, `error: ${err}`, targetUrl);
     return Response.json({ error: String(err) }, { status: 500 });
   }
 });
